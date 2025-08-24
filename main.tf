@@ -1,5 +1,5 @@
 ########################
-# S3 bucket (frozen)
+# S3 bucket
 ########################
 
 resource "aws_s3_bucket" "assets" {
@@ -9,7 +9,7 @@ resource "aws_s3_bucket" "assets" {
 resource "aws_s3_bucket_public_access_block" "assets" {
   bucket                  = aws_s3_bucket.assets.id
   block_public_acls       = true
-  block_public_policy     = false  # allow our explicit, restrictive bucket policy
+  block_public_policy     = false
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
@@ -31,7 +31,6 @@ resource "aws_iam_role" "ecs_task_execution_role" {
   assume_role_policy = data.aws_iam_policy_document.ecs_task_assume_role.json
 }
 
-# Standard AWS-managed execution policy for pulling images, CloudWatch Logs, etc.
 resource "aws_iam_role_policy_attachment" "ecs_task_execution_attach" {
   role       = aws_iam_role.ecs_task_execution_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
@@ -42,11 +41,8 @@ resource "aws_iam_role" "ecs_task_role" {
   assume_role_policy = data.aws_iam_policy_document.ecs_task_assume_role.json
 }
 
-# Bucket policy:
-# - Allow GetObject only from specific IP(s)
-# - Allow PutObject from the ECS TASK ROLE principal
+# Bucket policy for read and write controls
 data "aws_iam_policy_document" "bucket_policy" {
-  # READ from specific IP(s)
   statement {
     sid     = "AllowReadFromVpnIps"
     effect  = "Allow"
@@ -66,7 +62,6 @@ data "aws_iam_policy_document" "bucket_policy" {
     }
   }
 
-  # WRITE from ECS task role
   statement {
     sid     = "AllowWriteFromEcsTaskRole"
     effect  = "Allow"
@@ -90,20 +85,18 @@ resource "aws_s3_bucket_policy" "assets" {
 }
 
 ########################
-# ECS (frozen)
+# ECS cluster, task def, optional service
 ########################
 
 resource "aws_ecs_cluster" "this" {
   name = var.ecs_cluster_name
 }
 
-# Log group for the task
 resource "aws_cloudwatch_log_group" "task" {
   name              = "/ecs/${var.ecs_cluster_name}"
   retention_in_days = 14
 }
 
-# Minimal task definition (Fargate)
 locals {
   container_name = "app"
 }
@@ -140,7 +133,6 @@ resource "aws_ecs_task_definition" "this" {
   ])
 }
 
-# OPTIONAL ECS service (created only if create_service = true)
 resource "aws_ecs_service" "this" {
   count                              = var.create_service ? 1 : 0
   name                               = var.ecs_service_name
@@ -159,3 +151,123 @@ resource "aws_ecs_service" "this" {
     assign_public_ip = false
   }
 }
+
+########################
+# Cross-account role for Minded
+########################
+
+data "aws_iam_policy_document" "minded_trust" {
+  statement {
+    effect = "Allow"
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${var.minded_account_id}:root"]
+    }
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_iam_role" "minded_cross_account" {
+  name               = "MindedEcsAccessRole"
+  assume_role_policy = data.aws_iam_policy_document.minded_trust.json
+  description        = "Cross-account role that grants Minded the ability to view/update the ECS resources in this account."
+}
+
+data "aws_caller_identity" "current" {}
+
+locals {
+  cluster_name    = aws_ecs_cluster.this.name
+  logs_group_arn  = "arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:/ecs/${local.cluster_name}"
+  logs_stream_arn = "${local.logs_group_arn}:log-stream:*"
+}
+
+data "aws_iam_policy_document" "minded_perms" {
+  statement {
+    sid    = "ViewEcsClusterScoped"
+    effect = "Allow"
+    actions = [
+      "ecs:DescribeClusters",
+      "ecs:DescribeServices",
+      "ecs:DescribeTasks",
+      "ecs:ListServices",
+      "ecs:ListTasks"
+    ]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "ecs:cluster"
+      values   = [aws_ecs_cluster.this.arn]
+    }
+  }
+
+  statement {
+    sid     = "ListClusters"
+    effect  = "Allow"
+    actions = [
+      "ecs:ListClusters"
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid     = "LogsReadClusterGroup"
+    effect  = "Allow"
+    actions = [
+      "logs:DescribeLogStreams",
+      "logs:GetLogEvents"
+    ]
+    resources = [
+      local.logs_group_arn,
+      local.logs_stream_arn
+    ]
+  }
+
+  statement {
+    sid     = "UpdateEcsService"
+    effect  = "Allow"
+    actions = [
+      "ecs:UpdateService",
+      "ecs:UpdateCluster",
+      "ecs:UpdateClusterSettings",
+      "ecs:PutClusterCapacityProviders"
+    ]
+    resources = compact([
+      aws_ecs_cluster.this.arn,
+      length(aws_ecs_service.this) > 0 ? aws_ecs_service.this[0].arn : null
+    ])
+  }
+
+  statement {
+    sid     = "TaskDefinitionReadRegister"
+    effect  = "Allow"
+    actions = [
+      "ecs:DescribeTaskDefinition",
+      "ecs:ListTaskDefinitions",
+      "ecs:RegisterTaskDefinition"
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid     = "PassEcsRoles"
+    effect  = "Allow"
+    actions = ["iam:PassRole"]
+    resources = [
+      aws_iam_role.ecs_task_role.arn,
+      aws_iam_role.ecs_task_execution_role.arn
+    ]
+  }
+}
+
+resource "aws_iam_policy" "minded_ecs_policy" {
+  name        = "MindedEcsViewUpdate"
+  description = "View and update ECS cluster/service; pass the ECS roles."
+  policy      = data.aws_iam_policy_document.minded_perms.json
+}
+
+resource "aws_iam_role_policy_attachment" "attach_minded" {
+  role       = aws_iam_role.minded_cross_account.name
+  policy_arn = aws_iam_policy.minded_ecs_policy.arn
+}
+
+

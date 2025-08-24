@@ -4,6 +4,11 @@ variable "region" {
   default     = "us-east-1"
 }
 
+variable "minded_account_id" {
+  description = "External Minded AWS account ID (12 digits)"
+  type        = string
+}
+
 variable "bucket_name" {
   description = "Minded Onprem S3 bucket name"
   type        = string
@@ -13,7 +18,7 @@ variable "bucket_name" {
 variable "allowed_read_ip_cidrs" {
   description = "CIDR(s) allowed to READ (GetObject) directly from the bucket"
   type        = list(string)
-  default     = ["203.0.113.10/32"] # replace with your VPN egress IP(s)
+  default     = ["203.0.113.10/32"]
 }
 
 variable "ecs_cluster_name" {
@@ -41,13 +46,13 @@ variable "container_port" {
 }
 
 variable "fargate_cpu" {
-  type        = string
-  default     = "256"
+  type    = string
+  default = "256"
 }
 
 variable "fargate_memory" {
-  type        = string
-  default     = "512"
+  type    = string
+  default = "512"
 }
 
 variable "desired_count" {
@@ -73,3 +78,5 @@ variable "create_service" {
   type        = bool
   default     = false
 }
+
+
