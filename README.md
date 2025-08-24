@@ -1,6 +1,6 @@
-# 🚀 How to Use (Unified)
+# 🚀 How to Use
 
-This repository now provides a single Terraform stack that includes both the previously "frozen" resources and the "dynamic" cross-account access. Apply once and you're done.
+This repository now provides a way to deploy Minded on-prem assets to AWS.
 
 ## Deploy
 
