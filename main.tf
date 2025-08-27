@@ -192,7 +192,7 @@ data "aws_iam_policy_document" "minded_perms" {
       "ecs:ListServices",
       "ecs:ListTasks"
     ]
-    resources = ["*"]
+    resources = ["minded-*"]
     condition {
       test     = "StringEquals"
       variable = "ecs:cluster"
@@ -206,7 +206,7 @@ data "aws_iam_policy_document" "minded_perms" {
     actions = [
       "ecs:ListClusters"
     ]
-    resources = ["*"]
+    resources = ["minded-*"]
   }
 
   statement {
@@ -245,7 +245,7 @@ data "aws_iam_policy_document" "minded_perms" {
       "ecs:ListTaskDefinitions",
       "ecs:RegisterTaskDefinition"
     ]
-    resources = ["*"]
+    resources = ["minded-*"]
   }
 
   statement {
