@@ -1,0 +1,82 @@
+# Links every Dependabot PR to a Linear issue (SOC2 change-management).
+#
+# Why pull_request_target: a plain `pull_request` run triggered by Dependabot
+# gets a READ-ONLY token and NO access to Actions secrets, so it could neither
+# call Linear nor edit the PR. `pull_request_target` runs in the base-repo
+# context with secret access and a writable token. We NEVER check out the PR
+# head, so there is no untrusted-code-execution risk.
+#
+# Activation: add an Actions secret `LINEAR_API_KEY` (org-level recommended).
+# Until it exists, this workflow runs and no-ops.
+name: Link Dependabot PRs to Linear
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  link-linear:
+    if: ${{ github.actor == 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Linear issue and link the PR
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_TEAM_KEY: MD
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${LINEAR_API_KEY:-}" ]; then
+            echo "::notice::LINEAR_API_KEY not set — skipping. Add the secret to activate."
+            exit 0
+          fi
+
+          # Idempotency: if the title already starts with a Linear ID (e.g. on
+          # reopen), it is already linked — do nothing.
+          if printf '%s' "$PR_TITLE" | grep -qE '^[A-Z][A-Z0-9]*-[0-9]+ '; then
+            echo "PR already carries a Linear ID; nothing to do."
+            exit 0
+          fi
+
+          linear() { # $1=query  $2=variables-json
+            jq -nc --arg q "$1" --argjson v "$2" '{query:$q, variables:$v}' \
+              | curl -fsS -X POST https://api.linear.app/graphql \
+                  -H "Authorization: $LINEAR_API_KEY" \
+                  -H "Content-Type: application/json" --data @-
+          }
+
+          # 1) Resolve the team id from its key (fetch all, filter in jq — no
+          #    dependency on the server-side filter schema).
+          teams=$(linear 'query{ teams(first:250){ nodes{ id key } } }' '{}')
+          team_id=$(printf '%s' "$teams" | jq -r --arg k "$LINEAR_TEAM_KEY" \
+            '.data.teams.nodes[] | select(.key==$k) | .id' | head -n1)
+          if [ -z "$team_id" ]; then
+            echo "::error::Linear team '$LINEAR_TEAM_KEY' not found."
+            exit 1
+          fi
+
+          # 2) Create the issue for this PR.
+          desc="Automated dependency-update PR: ${PR_URL} (opened by Dependabot in ${REPO}). Tracked for SOC2 change management."
+          created=$(linear \
+            'mutation($i:IssueCreateInput!){ issueCreate(input:$i){ success issue{ identifier url } } }' \
+            "$(jq -nc --arg t "$team_id" --arg title "$PR_TITLE" --arg d "$desc" \
+                 '{i:{teamId:$t, title:$title, description:$d}}')")
+          ok=$(printf '%s'    "$created" | jq -r '.data.issueCreate.success // false')
+          ident=$(printf '%s' "$created" | jq -r '.data.issueCreate.issue.identifier // empty')
+          if [ "$ok" != "true" ] || [ -z "$ident" ]; then
+            echo "::error::Linear issue creation failed: $created"
+            exit 1
+          fi
+          echo "Created Linear issue $ident"
+
+          # 3) Prepend the identifier to the PR title so Linear back-links the PR.
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --title "$ident $PR_TITLE"
+          echo "::notice::Linked PR #$PR_NUMBER -> $ident"
